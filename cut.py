@@ -401,17 +401,17 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     
 if __name__ == "__main__":
     # Load image
-    image_path = "image_gray.jpg"
+    image_path = "tour_eiffel.jpg"
     image = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB) / 255.0
     # image = cv2.imread(image_path, cv2.IMRIMREAD_GRAYSCALEEAD) / 255.0
     
     # Create or load labeler
-    if True:  # Set to True to load previous seeds
-        labeler = SeedLabeler.load_seeds("saved_seeds")
+    if False:  # Set to True to load previous seeds
+        labeler = SeedLabeler.load_seeds(f"{image_path.split('.')[0]}_seeds")
     else:
         labeler = SeedLabeler(image, image_path)
         plt.show()  # User draws seeds
-        labeler.save_seeds("saved_seeds")  # Save after labeling
+        labeler.save_seeds(f"{image_path.split('.')[0]}_seeds")  # Save after labeling
     
     # # Run both algorithms
     # print("Running regular graph cuts...")
@@ -422,8 +422,8 @@ if __name__ == "__main__":
         image, 
         labeler.foreground, 
         labeler.background,
-        levels=4,
-        band_width=2,
+        levels=2,
+        band_width=1,
         factor=2,
     )
     
