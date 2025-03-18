@@ -5,6 +5,8 @@ from scipy.ndimage import binary_dilation, binary_erosion
 import maxflow
 import os
 from time import time
+from PIL import Image
+from tqdm import tqdm
 # ----------------------------
 # 1. Enhanced SeedLabeler with Save/Load
 # ----------------------------
@@ -13,15 +15,15 @@ class SeedLabeler:
     def __init__(self, image, image_path=None, no_fig=False):
         self.image = image
         self.image_path = image_path  # Store image path for reloading
-        self.foreground = np.zeros_like(image[..., 0], dtype=float)
-        self.background = np.zeros_like(image[..., 0], dtype=float)
+        self.foreground = np.zeros((image.shape[0], image.shape[1]), dtype=float)
+        self.background = np.zeros((image.shape[0], image.shape[1]), dtype=float)
         self.drawing = False  # Track whether mouse button is held
         self.current_label = None  # Track foreground or background labeling
         self.previous_pos = None
-
+        
         if not no_fig:
             self.fig, self.ax = plt.subplots()
-            self.ax.imshow(image)
+            self.ax.imshow(image, cmap="gray" if len(image.shape) == 2 else None)
             self.cid_press = self.fig.canvas.mpl_connect('button_press_event', self.on_press)
             self.cid_release = self.fig.canvas.mpl_connect('button_release_event', self.on_release)
             self.cid_motion = self.fig.canvas.mpl_connect('motion_notify_event', self.on_motion)
@@ -65,6 +67,9 @@ class SeedLabeler:
     
     def update_display(self):
         disp = self.image.copy()
+        if len(self.image.shape) == 2:
+            disp = np.concatenate([disp[:, :, None]]*3, axis=2)
+        
         disp[self.foreground.astype(bool)] = [1, 1, 0]  # Yellow
         disp[self.background.astype(bool)] = [0, 0, 1]  # Blue
         self.ax.imshow(disp)
@@ -158,7 +163,7 @@ def create_graph(image, fg_seeds, bg_seeds, sigma=0.1, connectivity=4):
                 offsets.append((dy, dx))
     
     # Add edges for all valid offsets
-    for y in range(h):
+    for y in tqdm(range(h)):
         for x in range(w):
             for dy, dx in offsets:
                 ny = y + dy
@@ -288,11 +293,14 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     # Initial segmentation at coarsest level
     c_img, c_fg, c_bg = pyramids[-1]
     graph, nodeids = create_graph(c_img, c_fg, c_bg, sigma, connectivity)
+    t0 = time()
     graph.maxflow()
+    t1 = time()
     segmentation = graph.get_grid_segments(nodeids)
     
     # Store coarsest level results
     all_results.append({
+        "time": t1 - t0,
         'level': levels-1,
         'image': c_img,
         'segmentation': segmentation,
@@ -314,11 +322,14 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
         # Create graph for current level
         img = pyramids[level][0]
         graph, nodeids = create_graph(img, new_fg_seeds, new_bg_seeds, sigma, connectivity)
+        t0 = time()
         graph.maxflow()
+        t1 = time()
         segmentation = graph.get_grid_segments(nodeids)
         
         # Store results for this level
         all_results.append({
+            "time": t1 - t0,
             'level': level,
             'image': img,
             'segmentation': segmentation,
@@ -327,15 +338,15 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
             'bg_seeds': new_bg_seeds
         })
 
-    banded_time = time() - t0
+    # banded_time = time() - t0
     
-    t0 = time()
+    
     # Compute regular graph cut for comparison
     graph, nodeids = create_graph(pyramids[0][0], pyramids[0][1], pyramids[0][2], sigma, connectivity)
+    t0 = time()
     graph.maxflow()
-    regular_seg = graph.get_grid_segments(nodeids)
     regular_time = time() - t0
-
+    regular_seg = graph.get_grid_segments(nodeids)
 
     # Create final visualization
     r = image.shape[1] / image.shape[0]
@@ -350,6 +361,8 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     orig_fg = pyramids[0][1]
     orig_bg = pyramids[0][2]
     img_vis = np.copy(orig_img)
+    if len(img_vis.shape) == 2:
+            img_vis = np.concatenate([img_vis[:, :, None]]*3, axis=2)
     img_vis[orig_fg.astype(bool)] = [1, 1, 0]  # Yellow for initial FG seeds
     img_vis[orig_bg.astype(bool)] = [0, 0, 1]  # Blue for initial BG seeds
     axs[0, 0].imshow(img_vis)
@@ -361,7 +374,7 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     seg_vis[segmentation] = [0, 1, 1]  # Cyan for BG
     axs[0, 1].imshow(img_vis)
     axs[0, 1].imshow(seg_vis, alpha=0.6)
-    axs[0, 1].set_title(f"Banded Graph Cut ({banded_time:.2g}s)")
+    axs[0, 1].set_title(f"Banded Graph Cut ({sum([res['time'] for res in all_results]):.2g}s)")
 
     # Plot regular graph cut result
     reg_vis = np.zeros((*regular_seg.shape, 3))
@@ -382,7 +395,7 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
         
         axs[1, i-1].imshow(result["image"])
         axs[1, i-1].imshow(seg_vis, alpha=0.6)
-        axs[1, i-1].set_title(f"Level {result['level']+1}\nSegmentation")
+        axs[1, i-1].set_title(f"Level {result['level']+1}\nSegmentation: {result['time']:.2g}s")
     
     result = all_results[-1]
     seg_vis = np.zeros((*result['segmentation'].shape, 4))    
@@ -391,8 +404,7 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     
     axs[1, -1].imshow(result["image"])
     axs[1, -1].imshow(seg_vis, alpha=0.6)
-    axs[1, -1].set_title(f"Level {result['level']}\nSegmentation")
-    
+    axs[1, -1].set_title(f"Level {result['level']}\nSegmentation: {result['time']:.2g}s")
     
     plt.tight_layout()
     plt.show()
@@ -401,12 +413,12 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     
 if __name__ == "__main__":
     # Load image
-    image_path = "tour_eiffel.jpg"
-    image = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB) / 255.0
-    # image = cv2.imread(image_path, cv2.IMRIMREAD_GRAYSCALEEAD) / 255.0
+    image_path = "venus.jpg"
+    
+    image = np.array(Image.open(image_path).convert('L')) / 255.0
     
     # Create or load labeler
-    if False:  # Set to True to load previous seeds
+    if True:  # Set to True to load previous seeds
         labeler = SeedLabeler.load_seeds(f"{image_path.split('.')[0]}_seeds")
     else:
         labeler = SeedLabeler(image, image_path)
@@ -422,9 +434,10 @@ if __name__ == "__main__":
         image, 
         labeler.foreground, 
         labeler.background,
-        levels=2,
+        levels=4,
         band_width=1,
         factor=2,
+        # sigma=0.3,
     )
     
     # r = image.shape[0]/image.shape[1]
