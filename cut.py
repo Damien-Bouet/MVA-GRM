@@ -5,6 +5,7 @@ from scipy.ndimage import binary_dilation, binary_erosion
 import maxflow
 import os
 from time import time
+from tqdm import tqdm
 # ----------------------------
 # 1. Enhanced SeedLabeler with Save/Load
 # ----------------------------
@@ -279,7 +280,7 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     
     # Coarsening stage
     pyramids = [(image, fg_seeds, bg_seeds)]
-    for _ in range(levels-1):
+    for _ in tqdm(range(levels-1)):
         c_img = coarsen(pyramids[-1][0], factor)
         c_fg = coarsen_seeds(pyramids[-1][1], factor)
         c_bg = coarsen_seeds(pyramids[-1][2], factor)
@@ -302,7 +303,7 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     })
     
     # Uncoarsening
-    for level in reversed(range(levels-1)):
+    for level in tqdm(reversed(range(levels-1))):
         # Project segmentation to next level
         curr_seg = segmentation
         curr_seg = cv2.resize(curr_seg.astype(np.uint8), pyramids[level][0].shape[:2][::-1], 
@@ -313,6 +314,7 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
         
         # Create graph for current level
         img = pyramids[level][0]
+        print(img.shape)
         graph, nodeids = create_graph(img, new_fg_seeds, new_bg_seeds, sigma, connectivity)
         graph.maxflow()
         segmentation = graph.get_grid_segments(nodeids)
@@ -331,10 +333,10 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     
     t0 = time()
     # Compute regular graph cut for comparison
-    graph, nodeids = create_graph(pyramids[0][0], pyramids[0][1], pyramids[0][2], sigma, connectivity)
-    graph.maxflow()
-    regular_seg = graph.get_grid_segments(nodeids)
-    regular_time = time() - t0
+    # graph, nodeids = create_graph(pyramids[0][0], pyramids[0][1], pyramids[0][2], sigma, connectivity)
+    # graph.maxflow()
+    # regular_seg = graph.get_grid_segments(nodeids)
+    # regular_time = time() - t0
 
 
     # Create final visualization
@@ -364,12 +366,12 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     axs[0, 1].set_title(f"Banded Graph Cut ({banded_time:.2g}s)")
 
     # Plot regular graph cut result
-    reg_vis = np.zeros((*regular_seg.shape, 3))
-    reg_vis[~regular_seg] = [1, 1, 0]  # Yellow for FG
-    reg_vis[regular_seg] = [0, 1, 1]  # Cyan for BG
-    axs[0, 2].imshow(img_vis)
-    axs[0, 2].imshow(reg_vis, alpha=0.6)
-    axs[0, 2].set_title(f"Regular\nGraph Cut ({regular_time:.2g}s)")
+    # reg_vis = np.zeros((*regular_seg.shape, 3))
+    # reg_vis[~regular_seg] = [1, 1, 0]  # Yellow for FG
+    # reg_vis[regular_seg] = [0, 1, 1]  # Cyan for BG
+    # axs[0, 2].imshow(img_vis)
+    # axs[0, 2].imshow(reg_vis, alpha=0.6)
+    # axs[0, 2].set_title(f"Regular\nGraph Cut ({regular_time:.2g}s)")
     
     # Plot intermediate results
     for i, result in enumerate(all_results):
@@ -401,7 +403,7 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     
 if __name__ == "__main__":
     # Load image
-    image_path = "image_gray.jpg"
+    image_path = r"D:\3ACS\GRM\Projet\images\4k-3840-x-2160-wallpapers-themefoxx (1049).jpg"
     image = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB) / 255.0
     # image = cv2.imread(image_path, cv2.IMRIMREAD_GRAYSCALEEAD) / 255.0
     
@@ -422,7 +424,7 @@ if __name__ == "__main__":
         image, 
         labeler.foreground, 
         labeler.background,
-        levels=4,
+        levels=8,
         band_width=2,
         factor=2,
     )
