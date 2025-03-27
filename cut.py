@@ -7,6 +7,7 @@ import os
 from time import time
 from PIL import Image
 from tqdm import tqdm
+import tracemalloc, gc
 # ----------------------------
 # 1. Enhanced SeedLabeler with Save/Load
 # ----------------------------
@@ -15,8 +16,8 @@ class SeedLabeler:
     def __init__(self, image, image_path=None, no_fig=False):
         self.image = image
         self.image_path = image_path  # Store image path for reloading
-        self.foreground = np.zeros((image.shape[0], image.shape[1]), dtype=float)
-        self.background = np.zeros((image.shape[0], image.shape[1]), dtype=float)
+        self.foreground = np.zeros((image.shape[0], image.shape[1]), dtype=bool)
+        self.background = np.zeros((image.shape[0], image.shape[1]), dtype=bool)
         self.drawing = False  # Track whether mouse button is held
         self.current_label = None  # Track foreground or background labeling
         self.previous_pos = None
@@ -53,14 +54,14 @@ class SeedLabeler:
             n = max(abs(self.previous_pos[0] - x), abs(self.previous_pos[1] - y))
             for x_, y_ in zip(np.linspace(self.previous_pos[0], x, n), np.linspace(self.previous_pos[1], y, n)):
                 if self.current_label == 'foreground':
-                    self.foreground[int(y_):int(y_)+2, int(x_):int(x_)+2] = 1
+                    self.foreground[int(y_):int(y_)+2, int(x_):int(x_)+2] = True
                 elif self.current_label == 'background':
-                    self.background[int(y_):int(y_)+2, int(x_):int(x_)+2] = 1
+                    self.background[int(y_):int(y_)+2, int(x_):int(x_)+2] = True
                     
         if self.current_label == 'foreground':
-            self.foreground[y:y+2, x:x+2] = 1
+            self.foreground[y:y+2, x:x+2] = True
         elif self.current_label == 'background':
-            self.background[y:y+2, x:x+2] = 1
+            self.background[y:y+2, x:x+2] = True
             
         self.previous_pos = (x, y)
         self.update_display()
@@ -93,19 +94,25 @@ class SeedLabeler:
                 image_path = f.read().strip()
         
         if image_path and os.path.exists(image_path):
-            image = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB) / 255.0
+            image = (cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB) / 255.0).astype(np.float32)
         else:
             raise FileNotFoundError("Original image not found")
         
         labeler = cls(image, image_path, no_fig=True)
-        labeler.foreground = np.load(os.path.join(save_dir, 'foreground.npy'))
-        labeler.background = np.load(os.path.join(save_dir, 'background.npy'))
+        labeler.foreground = np.load(os.path.join(save_dir, 'foreground.npy')).astype(bool)
+        labeler.background = np.load(os.path.join(save_dir, 'background.npy')).astype(bool)
         return labeler
 
 
 # ----------------------------
 # 2. Fixed Coarsening Functions
 # ----------------------------
+
+def create_band_mask(prev_seg, band_width):
+    dilated = binary_dilation(prev_seg, iterations=band_width)
+    eroded = binary_erosion(prev_seg, iterations=band_width)
+    return dilated ^ eroded  # XOR = band region
+
 def coarsen(img, factor=2):
     """Coarsen image with padding if needed"""
     h, w = img.shape[:2]
@@ -126,7 +133,7 @@ def coarsen_seeds(seeds, factor=2):
 
     # Reshape and take max over blocks
     h_p, w_p = padded.shape
-    coarse = padded.reshape(h_p//factor, factor, w_p//factor, factor).max(axis=(1, 3))
+    coarse = padded.reshape(h_p//factor, factor, w_p//factor, factor).max(axis=(1, 3)).astype(bool)
     return coarse[:h//factor, :w//factor]  # Crop back to original size
 
 # ----------------------------
@@ -182,7 +189,12 @@ def regular_graph_cuts(image, fg_seeds, bg_seeds, sigma=0.1, connectivity=8):
     """Standard graph cuts without multilevel optimization"""
     graph, nodeids = create_graph(image, fg_seeds, bg_seeds, sigma, connectivity)
     graph.maxflow()
-    return graph.get_grid_segments(nodeids)
+    graph_size = graph.get_node_num()  # Number of nodes
+    edge_count = graph.get_edge_num()  # Number of edges
+    print("Graph node: ", graph_size, "Graph edges: ", edge_count)
+    segmentation = graph.get_grid_segments(nodeids)
+    del graph, nodeids
+    return segmentation
 
 
 # # ----------------------------
@@ -280,8 +292,7 @@ def create_band_and_seeds(curr_seg, band_width=1):
 def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, sigma=0.1, connectivity=8, factor=2):
     # Coarsening stage
     all_results = []
-    t0 = time()
-    
+    t0 = time()    
     # Coarsening stage
     pyramids = [(image, fg_seeds, bg_seeds)]
     for _ in tqdm(range(levels-1)):
@@ -292,15 +303,26 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     
     # Initial segmentation at coarsest level
     c_img, c_fg, c_bg = pyramids[-1]
+
+    
     graph, nodeids = create_graph(c_img, c_fg, c_bg, sigma, connectivity)
+    gc.collect()
+    tracemalloc.start()
     t0 = time()
     graph.maxflow()
     t1 = time()
+    current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
     segmentation = graph.get_grid_segments(nodeids)
+    
+    # print(tracemalloc.get_traced_memory()[0]/10**6)
+    
     
     # Store coarsest level results
     all_results.append({
         "time": t1 - t0,
+        "memory": peak/ 10**6,
         'level': levels-1,
         'image': c_img,
         'segmentation': segmentation,
@@ -308,7 +330,7 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
         'fg_seeds': c_fg,
         'bg_seeds': c_bg
     })
-    
+    del graph, nodeids
     # Uncoarsening
     for level in tqdm(reversed(range(levels-1))):
         # Project segmentation to next level
@@ -318,19 +340,31 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
         
         # Create band and new seeds
         band, new_fg_seeds, new_bg_seeds = create_band_and_seeds(curr_seg, band_width)
+        print(f"Level {level} - Band Pixels: {np.count_nonzero(band)}, Total Pixels: {image.size}")
+
         
         # Create graph for current level
         img = pyramids[level][0]
-        print(img.shape)
+        
         graph, nodeids = create_graph(img, new_fg_seeds, new_bg_seeds, sigma, connectivity)
+        
+        gc.collect()
+        tracemalloc.start()
         t0 = time()
         graph.maxflow()
         t1 = time()
+        _, peak_lvl = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
         segmentation = graph.get_grid_segments(nodeids)
+        
+        # print(tracemalloc.get_traced_memory()[0]/10**6)
+        
         
         # Store results for this level
         all_results.append({
             "time": t1 - t0,
+            "memory": peak_lvl/ 10**6,
             'level': level,
             'image': img,
             'segmentation': segmentation,
@@ -339,15 +373,26 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
             'bg_seeds': new_bg_seeds
         })
 
+        del graph, band, nodeids
+
     # banded_time = time() - t0
     
     
     # Compute regular graph cut for comparison
+    
     graph, nodeids = create_graph(pyramids[0][0], pyramids[0][1], pyramids[0][2], sigma, connectivity)
+    
+    gc.collect()
+    tracemalloc.start()
     t0 = time()
     graph.maxflow()
     regular_time = time() - t0
+    current, peak_reg = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
     regular_seg = graph.get_grid_segments(nodeids)
+    
+    
 
     # Create final visualization
     r = image.shape[1] / image.shape[0]
@@ -375,15 +420,15 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     seg_vis[segmentation] = [0, 1, 1]  # Cyan for BG
     axs[0, 1].imshow(img_vis)
     axs[0, 1].imshow(seg_vis, alpha=0.6)
-    axs[0, 1].set_title(f"Banded Graph Cut ({sum([res['time'] for res in all_results]):.2g}s)")
+    axs[0, 1].set_title(f"Banded Graph Cut ({sum([res['time'] for res in all_results]):.2g}s | {sum([res['memory'] for res in all_results]):.2g}MB)")
 
     # Plot regular graph cut result
-    # reg_vis = np.zeros((*regular_seg.shape, 3))
-    # reg_vis[~regular_seg] = [1, 1, 0]  # Yellow for FG
-    # reg_vis[regular_seg] = [0, 1, 1]  # Cyan for BG
-    # axs[0, 2].imshow(img_vis)
-    # axs[0, 2].imshow(reg_vis, alpha=0.6)
-    # axs[0, 2].set_title(f"Regular\nGraph Cut ({regular_time:.2g}s)")
+    reg_vis = np.zeros((*regular_seg.shape, 3))
+    reg_vis[~regular_seg] = [1, 1, 0]  # Yellow for FG
+    reg_vis[regular_seg] = [0, 1, 1]  # Cyan for BG
+    axs[0, 2].imshow(img_vis)
+    axs[0, 2].imshow(reg_vis, alpha=0.6)
+    axs[0, 2].set_title(f"Regular\nGraph Cut ({regular_time:.2g}s | {peak_reg/10**6:.2g}MB)")
     
     # Plot intermediate results
     for i, result in enumerate(all_results):
@@ -396,7 +441,7 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
         
         axs[1, i-1].imshow(result["image"])
         axs[1, i-1].imshow(seg_vis, alpha=0.6)
-        axs[1, i-1].set_title(f"Level {result['level']+1}\nSegmentation: {result['time']:.2g}s")
+        axs[1, i-1].set_title(f"Level {result['level']+1}\nSegmentation: {result['time']:.2g}s | {result['memory']:.2g}MB")
     
     result = all_results[-1]
     seg_vis = np.zeros((*result['segmentation'].shape, 4))    
@@ -405,18 +450,20 @@ def multilevel_banded_cuts(image, fg_seeds, bg_seeds, levels=2, band_width=1, si
     
     axs[1, -1].imshow(result["image"])
     axs[1, -1].imshow(seg_vis, alpha=0.6)
-    axs[1, -1].set_title(f"Level {result['level']}\nSegmentation: {result['time']:.2g}s")
+    axs[1, -1].set_title(f"Level {result['level']}\nSegmentation: {result['time']:.2g}s | {result['memory']:.2g}MB")
     
     plt.tight_layout()
+    fig.savefig("mountains_4k_res.png")
     plt.show()
     
     return segmentation
     
 if __name__ == "__main__":
     # Load image
-    image_path = "venus.jpg"
+    image_path = "images/mountains_4k.jpg"
+    # image_path = "venus.jpg"
     
-    image = np.array(Image.open(image_path).convert('L')) / 255.0
+    image = (np.array(Image.open(image_path).convert('L')) / 255.0).astype(np.float32)
     
     # Create or load labeler
     if True:  # Set to True to load previous seeds
@@ -427,9 +474,9 @@ if __name__ == "__main__":
         labeler.save_seeds(f"{image_path.split('.')[0]}_seeds")  # Save after labeling
     
     # # Run both algorithms
-    # print("Running regular graph cuts...")
+    print("Running regular graph cuts...")
     # regular_seg = regular_graph_cuts(image, labeler.foreground, labeler.background, 0.1, 8)
-    
+
     print("Running multilevel banded graph cuts...")
     banded_seg = multilevel_banded_cuts(
         image, 
@@ -440,6 +487,7 @@ if __name__ == "__main__":
         factor=2,
         # sigma=0.3,
     )
+    print("Banded Graph Cuts Memory:", tracemalloc.get_traced_memory()[0]/10**6)
     
     # r = image.shape[0]/image.shape[1]
     # # Show comparison

@@ -13,6 +13,11 @@ from time import time
 import networkx
 
 import os
+
+import csv
+import pandas as pd
+
+
 class SeedLabeler:
     def __init__(self, image, image_path=None, no_fig=False):
         self.image = image
@@ -55,9 +60,9 @@ class SeedLabeler:
             n = max(abs(self.previous_pos[0] - x), abs(self.previous_pos[1] - y))
             for x_, y_ in zip(np.linspace(self.previous_pos[0], x, n), np.linspace(self.previous_pos[1], y, n)):
                 if self.current_label == 'foreground':
-                    self.foreground[int(y_):int(y_)+2, int(x_):int(x_)+2] = True
+                    self.foreground[int(y_):int(y_)+4, int(x_):int(x_)+4] = True
                 elif self.current_label == 'background':
-                    self.background[int(y_):int(y_)+2, int(x_):int(x_)+2] = True
+                    self.background[int(y_):int(y_)+4, int(x_):int(x_)+4] = True
                     
         if self.current_label == 'foreground':
             self.foreground[y:y+2, x:x+2] = True
@@ -132,28 +137,80 @@ def coarsen_seeds(seeds, factor=2):
 # 1. Band-Limited Graph Construction
 # ----------------------------
 
-def create_memory_optimized_graph(img, band_mask, prev_seg, sigma):
+def create_memory_optimized_graph(img, level, band_width, prev_seg, sigma):
     """Memory-efficient graph construction"""
     h, w = img.shape[:2]
     graph = maxflow.GraphFloat()
+    padded_seg = np.pad(prev_seg, band_width, mode='reflect')
     
-    # 1. Add nodes in bulk for band pixels
-    band_pixels = np.argwhere(band_mask)
+    # Perform operations on padded array
+    inner_edge = binary_erosion(padded_seg, iterations=band_width)[band_width:-band_width, band_width:-band_width]
+    outer_edge = binary_dilation(padded_seg, iterations=band_width)[band_width:-band_width, band_width:-band_width]
+    
+    padded_inner_edge = np.pad(inner_edge, band_width, mode='reflect')
+    padded_outer_edge = np.pad(outer_edge, band_width, mode='reflect')
+    
+    sink_region = binary_dilation(padded_outer_edge) & ~padded_outer_edge
+    sink_pixels = np.argwhere(sink_region[band_width:-band_width, band_width:-band_width])
+    source_region = ~binary_erosion(padded_inner_edge) & padded_inner_edge
+    
+    # Calculate band and remove padding
+    band_mask = (outer_edge ^ inner_edge)
+    source_pixels = np.argwhere(source_region[band_width:-band_width, band_width:-band_width])
+    band_pixels = np.argwhere(band_mask | source_region[band_width:-band_width, band_width:-band_width] | sink_region[band_width:-band_width, band_width:-band_width])
     node_ids = graph.add_nodes(len(band_pixels))
+    
     node_map = {(y,x): idx for idx, (y,x) in enumerate(band_pixels)}
+    # 1. Add nodes in bulk for band pixels
+    # fig, axs = plt.subplots(1,3)    
+    # axs[0].imshow(prev_seg)
+    # axs[0].axis("off")
+    # axs[1].imshow(inner_edge)
+    # axs[1].axis("off")
+    # axs[2].imshow(outer_edge)
+    # axs[2].axis("off")
+    # plt.savefig(os.path.join(results_path, f"in_out_edges_{level}.png"))
+    # plt.figure(figsize =(30,20))
+    # plt.imshow(band_mask)
+    # plt.savefig(os.path.join(results_path, f"bandmask_{level}.png"))
+    
+    # # 2. Identify fixed regions
+    
+    # plt.imshow(binary_erosion(padded_inner_edge))
+    # plt.savefig(os.path.join(results_path, f"eroded_padded_inner_edge_{level}.png"))
+    # plt.imshow(padded_inner_edge)
+    # plt.savefig(os.path.join(results_path, f"padded_inner_edge_{level}.png"))
     
     # 2. Process in chunks to reduce peak memory
     chunk_size = 10000
-    offsets = [(0, 1), (1, -1), (1, 0), (1, 1)]
+    offsets = [(-1, 0),
+           (0, -1),        (0, 1),
+            (1, 0)]
+    # plt.figure(figsize =(30,20))
+    # plt.imshow(img, cmap = "gray")
+    # plt.imshow(prev_seg, alpha = 0.4)
+    # plt.imshow(band_mask, cmap = "jet", alpha=0.3)
+    # source_vis = np.zeros((*source_region.shape, 4))
+    # source_vis[source_region] = [1,1,0, 0.6]  # Yellow FG
+    # plt.imshow(source_vis[band_width:-band_width, band_width:-band_width])
+    # sink_vis = np.zeros((*sink_region.shape, 4))
+    # sink_vis[sink_region] = [0,0,1, 0.6]   # Blue BG
+    # plt.imshow(sink_vis[band_width:-band_width, band_width:-band_width])
+    
+    # plt.savefig(os.path.join(results_path, f"edges_{level}.png"))
+    # print(sink_pixels.shape, band_pixels.shape)
     for i in range(0, len(band_pixels), chunk_size):
         chunk = band_pixels[i:i+chunk_size]
         
         # Add t-links
         for y, x in chunk:
-            if prev_seg[y,x]:
-                graph.add_tedge(node_map[(y,x)], 0, 1)
+            if np.any(np.all(sink_pixels == (y,x), axis=1)):
+                graph.add_tedge(node_map[(y,x)], 1e9, 0)
+            elif np.any(np.all(source_pixels == (y,x), axis=1)):
+                graph.add_tedge(node_map[(y,x)], 0, 1e9)
+            
             else:
-                graph.add_tedge(node_map[(y,x)], 1, 0)
+                graph.add_tedge(node_map[(y,x)], 0, 0)
         
         # Add n-links
         for y, x in chunk:
@@ -161,7 +218,13 @@ def create_memory_optimized_graph(img, band_mask, prev_seg, sigma):
                 ny, nx = y+dy, x+dx
                 if (ny,nx) in node_map:
                     diff = np.sum((img[y,x]-img[ny,nx])**2)
-                    weight = np.exp(-diff/(2*sigma**2))
+                    # dist = np.sqrt((y - ny) ** 2 + (x - nx) ** 2)
+
+                    # Avoid division by zero for direct neighbors (if necessary)
+                    # dist = max(dist, 1e-6)  # Prevent division errors
+
+                    # Compute weight with distance normalization
+                    weight = np.exp(-diff / (2 * sigma**2))
                     graph.add_edge(node_map[(y,x)], node_map[(ny,nx)], weight, weight)
     
     return graph, node_map
@@ -170,33 +233,35 @@ def create_memory_optimized_graph(img, band_mask, prev_seg, sigma):
 # 2. Multilevel Banded Cuts
 # ----------------------------
 
-def memory_optimized_banded_cuts(image, fg_seeds, bg_seeds, levels=3, band_width=2, factor = 2, sigma=0.1):
+def memory_optimized_banded_cuts(image, fg_seeds, bg_seeds, levels=3, band_width=2, factor = 2, sigma=0.1, compute_baseline = False):
     """Memory-optimized version with proper visualization"""
     # Initialize results storage
     all_results = []
     #0. Baseline, regular GC
-    print("Computing baseline GC...")
-    gc.collect()
-    tracemalloc.start()
-    t0 = time()
-    regular_seg = regular_graph_cuts(image,fg_seeds, bg_seeds, sigma)
-    t1 = time()
-    _, peak_mem = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    
-    all_results.append({
-        'type': 'baseline',
-        'time': t1 - t0,
-        'memory': peak_mem / 1e6,
-        'image': image.copy(),
-        'segmentation': regular_seg.copy()
-    })
-
+    if compute_baseline:
+        print("Computing baseline GC...")
+        gc.collect()
+        tracemalloc.start()
+        t0 = time()
+        regular_seg = regular_graph_cuts(image,fg_seeds, bg_seeds, sigma)
+        t1 = time()
+        _, peak_mem = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        
+        all_results.append({
+            'type': 'baseline',
+            'time': t1 - t0,
+            'memory': peak_mem / 1e6,
+            'image': image.copy(),
+            'segmentation': regular_seg.copy()
+        })
+    else:
+        regular_seg = None
     # 1. Coarsening stage with memory tracking
     current_img, current_fg, current_bg = image, fg_seeds, bg_seeds
 
     all_results.append({
-        'type': 'original',
+        'type': 'pyramid',
         'image': image.copy(),
         'fg_seeds': fg_seeds,
         "bg_seeds": bg_seeds
@@ -211,6 +276,14 @@ def memory_optimized_banded_cuts(image, fg_seeds, bg_seeds, levels=3, band_width
         new_fg = coarsen_seeds(pyramids[-1][1], factor)
         new_bg = coarsen_seeds(pyramids[-1][2], factor)
         pyramids.append((new_img, new_fg, new_bg))
+
+        all_results.append({
+        'type': 'pyramid',
+        'image': new_img.copy(),
+        'fg_seeds': new_fg.copy(),
+        "bg_seeds": new_bg.copy()
+        
+        })
         
         # Clean up
         del current_img, current_fg, current_bg
@@ -235,27 +308,30 @@ def memory_optimized_banded_cuts(image, fg_seeds, bg_seeds, levels=3, band_width
 
     
     # 3. Uncoarsening with band refinement
-    for level in reversed(range(levels-1)):
-        current_seg = seg.copy()
-        print(current_seg.shape)
-        
+    for level in reversed(range(levels)):
+        current_seg = seg.copy()        
         t0 = time()
         
         # Project segmentation
         curr_img = pyramids[level][0]
+        plt.imshow(current_seg, cmap="gray")
+        plt.savefig(f"seg{level}_before")
         seg = cv2.resize(current_seg.copy().astype(float), curr_img.shape[:2][::-1], 
-                        interpolation=cv2.INTER_NEAREST) > 0.5
-        
-        print(current_seg.shape, curr_img.shape)
-        
+                        interpolation=cv2.INTER_NEAREST)>0.5
+        plt.imshow(seg.astype(int), cmap="gray")
+        plt.savefig(f"seg{level}_after")    
         # Create band
-        band_mask = (binary_dilation(seg, iterations=band_width) ^ 
-                    binary_erosion(seg, iterations=band_width))
+        band_mask = (binary_dilation(seg, iterations=band_width//2) ^ 
+                     binary_erosion(seg, iterations=band_width//2 + 1))
         
+        plt.imshow(band_mask, cmap="gray")
+        plt.savefig(f"band_mask{level}_after")
         # Build and solve banded graph
         gc.collect()
         tracemalloc.start()
-        graph, node_map = create_memory_optimized_graph(curr_img, band_mask, seg, sigma)
+        print("Creating the Graph...")
+        graph, node_map = create_memory_optimized_graph(curr_img, level, band_width, seg, sigma)
+        print("Doing max flow...")
         graph.maxflow()
         
         # Update segmentation
@@ -282,7 +358,7 @@ def memory_optimized_banded_cuts(image, fg_seeds, bg_seeds, levels=3, band_width
     # 4. Create memory-efficient visualization
     create_detailed_visualization(all_results, image.shape[1]/image.shape[0])
     
-    return seg
+    return regular_seg, seg, all_results
 
 def visualize_node_map(node_map, img_shape):
     """Visualize the assigned node IDs in the image space"""
@@ -321,7 +397,8 @@ def create_detailed_visualization(results, aspect_ratio):
     """Enhanced visualization showing segmentation at each step"""
     # Filter and organize results
     seg_steps = [r for r in results if r['type'] in ['segmentation', 'refinement']]
-    
+    baseline = [r for r in results if r['type'] == "baseline"]
+    pyramids = [r for r in results if r['type'] == "pyramid"]
     # Create figure layout
     n_cols = len(seg_steps) + 1
     fig, axs = plt.subplots(2, n_cols, 
@@ -329,18 +406,19 @@ def create_detailed_visualization(results, aspect_ratio):
                           constrained_layout=True)
     
     #Plot baseline
-    baseline = results[0]
-    seg_vis = np.zeros((*baseline['segmentation'].shape, 4))
-    seg_vis[~baseline['segmentation']] = [1, 1, 0, 0.6]  # Yellow FG
-    seg_vis[baseline['segmentation']] = [0, 0, 1, 0.6]   # Blue BG
-    axs[0,2].imshow(baseline['image'], cmap='gray' if len(baseline['image'].shape) == 2 else None)
-    axs[0,2].imshow(seg_vis)
-    axs[0,2].set_title(f"Baseline\n(Time spent: {baseline['time']:.2g}s | Memory: {baseline['memory']:.2g}MB")
-    # axs[0,1].axis('off') 
+    for b in baseline: 
+        seg_vis = np.zeros((*b['segmentation'].shape, 4))
+        seg_vis[b['segmentation']] = [1, 1, 0, 0.6]  # Yellow FG
+        seg_vis[~b['segmentation']] = [0, 0, 1, 0.6]   # Blue BG
+        axs[0,2].imshow(b['image'], cmap='gray' if len(b['image'].shape) == 2 else None)
+        axs[0,2].imshow(seg_vis)
+        axs[0,2].set_title(f"Baseline\nTime spent: {b['time']:.2g}s\nMemory: {b['memory']:.2g}MB")
+    # else:
+    #     axs[0,2].axis('off')
 
 
     # Plot initial seeds
-    initial = results[1]
+    initial = pyramids[0]
     img_vis = np.stack([initial['image']]*3, axis=-1) if len(initial['image'].shape) == 2 else initial['image']
     img_vis = img_vis.copy()
     img_vis[initial['fg_seeds']] = [1, 1, 0]  # Yellow
@@ -349,43 +427,55 @@ def create_detailed_visualization(results, aspect_ratio):
     axs[0,0].set_title("Initial Seeds")
 
     # Plot initial seeds
-    end_banded = results[-1]
+    end_banded = seg_steps[-1]
     seg_vis = np.zeros((*end_banded['segmentation'].shape, 4))
-    seg_vis[~end_banded['segmentation']] = [1, 1, 0, 0.6]  # Yellow FG
-    seg_vis[end_banded['segmentation']] = [0, 0, 1, 0.6]   # Blue BG
+    seg_vis[end_banded['segmentation']] = [1, 1, 0, 0.6]  # Yellow FG
+    seg_vis[~end_banded['segmentation']] = [0, 0, 1, 0.6]   # Blue BG
     axs[0,1].imshow(end_banded['image'], cmap='gray' if len(end_banded['image'].shape) == 2 else None)
     axs[0,1].imshow(seg_vis)
-    axs[0,1].set_title(f"end_banded\n(Time spent: {sum([s['time'] for s in seg_steps]):.2g}s | Memory: {sum([s['memory'] for s in seg_steps]):.2g}MB")
+    axs[0,1].set_title(f"End Banded GC\nTime spent: {sum([s['time'] for s in seg_steps]):.2g}s\nMemory: {sum([s['memory'] for s in seg_steps]):.2g}MB")
 
+    for k in range(2, n_cols):
+        axs[0,k].axis("off")
     
     # Plot coarse levels and their segmentations
-    for i, seg in enumerate(seg_steps, start=2):
-
+    for i, seg in enumerate(seg_steps, start=0):
+        print(seg["image"].shape)
         if 'segmentation' in seg:
             seg_vis = np.zeros((*seg['segmentation'].shape, 4))
-            seg_vis[~seg['segmentation']] = [1, 1, 0, 0.6]  # Yellow FG
-            seg_vis[seg['segmentation']] = [0, 0, 1, 0.6]   # Blue BG
+            seg_vis[seg['segmentation']] = [1, 1, 0, 0.6]  # Yellow FG
+            seg_vis[~seg['segmentation']] = [0, 0, 1, 0.6]   # Blue BG
             
             # Overlay segmentation on original image
-            axs[1,i-2].imshow(seg['image'], cmap='gray' if len(seg['image'].shape) == 2 else None)
-            axs[1,i-2].imshow(seg_vis)
+            # print(len(pyramids))
+            corresponding_seed = pyramids[-1 - i]
+            # print(corresponding_seed["image"].shape)
+            img_vis = np.stack([corresponding_seed['image']]*3, axis=-1) if len(corresponding_seed['image'].shape) == 2 else corresponding_seed['image']
+            img_vis = img_vis.copy()
+            img_vis[corresponding_seed['fg_seeds']] = [1, 1, 0]  # Yellow
+            img_vis[corresponding_seed['bg_seeds']] = [0, 0, 1]  # Blue
+            axs[1,i].imshow(img_vis)
+            # axs[1,i].imshow(seg_vis)
+            
             
             # Add timing and memory info
             info = f"Time: {seg['time']:.2f}s\nMem: {seg['memory']:.1f}MB"
             if 'band_mask' in seg:
+
                 info += "\n(Banded)"
+                axs[1,i].imshow(seg["band_mask"], cmap="gray", alpha = 0.6)
                 # axs[1,i].imshow(seg['band_mask'], cmap='gray' if len(seg['band_mask'].shape) == 2 else None)
-            axs[1,i-2].set_title(info)
+
+            
     
     # Hide unused axes
-    # for j in range(i, n_cols):
-    #     axs[0,j].axis('off')
-    #     axs[1,j].axis('off')
+    for j in range(n_cols-1, n_cols):
+        axs[1,j].axis('off')
     
     
     plt.suptitle("Banded Graph Cuts Progression", y=1.02)
-    fig.savefig("venus_hd_res.png")
-    plt.show()
+    fig.savefig(os.path.join(os.path.dirname(IMAGE_PATH), "results", os.path.basename(IMAGE_PATH),"all_res.png"))
+    # plt.show()
 
 
 # ----------------------------
@@ -398,16 +488,19 @@ def regular_graph_cuts(image, fg_seeds, bg_seeds, sigma=0.1):
     graph = maxflow.GraphFloat()
     nodeids = graph.add_grid_nodes((h, w))
     
+    print("Creating the Graph...")
     # Set t-links
     for y in range(h):
         for x in range(w):
             if fg_seeds[y, x]:
-                graph.add_tedge(nodeids[y, x], 1, 0)
+                graph.add_tedge(nodeids[y, x], 0, 1e9)
             elif bg_seeds[y, x]:
-                graph.add_tedge(nodeids[y, x], 0, 1)
+                graph.add_tedge(nodeids[y, x], 1e9, 0)
     
     # Add n-links
-    offsets = [(0, 1), (1, -1), (1, 0), (1, 1)]
+    offsets = [(-1, -1), (-1, 0), (-1, 1),
+           (0, -1),        (0, 1),
+           (1, -1), (1, 0), (1, 1)]
     for y in range(h):
         for x in range(w):
             for dy, dx in offsets:
@@ -416,6 +509,7 @@ def regular_graph_cuts(image, fg_seeds, bg_seeds, sigma=0.1):
                     weight = np.exp(-np.sum((image[y,x]-image[ny,nx])**2/(2*sigma**2)))
                     graph.add_edge(nodeids[y, x], nodeids[ny, nx], weight, weight)
     
+    print("Doing max flow...")
     graph.maxflow()
     return graph.get_grid_segments(nodeids)
 
@@ -437,38 +531,118 @@ def display_memory_diff(stats, limit=5):
     for stat in stats[:limit]:
         print(f"{stat.traceback.format()[0]}: {stat.size_diff/1024:.1f} KiB")
 
+def get_metrics(segmentation, ground_truth):
+    TP = np.sum(np.logical_and(segmentation == 1, ground_truth == 1))
+    FP = np.sum(np.logical_and(segmentation == 1, ground_truth == 0))
+    TN = np.sum(np.logical_and(segmentation == 0, ground_truth == 0))
+    FN = np.sum(np.logical_and(segmentation == 0, ground_truth == 1))
+
+    recall = TP/(TP + FN) if TP + FN >0 else 1
+
+    precision = TP/(TP+FP) if TP + FP >0 else 1
+
+    F1_score = 2*recall*precision / (recall + precision)
+
+    DICE = 2*TP/(2*TP + FP + FN)
+
+    accuracy = (TP+TN)/(segmentation.shape[0] * segmentation.shape[1])
+    return DICE, recall, precision
+
+
+
 if __name__ == "__main__":
     # Load image and seeds
-    image_path = "venus_hd.jpg"
-    # image_path = "venus.jpg"
-    
-    image = (np.array(Image.open(image_path).convert('L')) / 255.0).astype(np.float32)
-    
+    IMAGE_PATH = r"D:\3ACS\GRM\Projet\images\rock_4k.jpg"
+    GROUND_TRUTH = r"D:\3ACS\GRM\Projet\images\rock_4k_gt.png"
+
+    results_path = os.path.join(os.path.dirname(IMAGE_PATH), "results", os.path.basename(IMAGE_PATH))
+    os.makedirs(results_path, exist_ok=True)
+
+    # Load images
+    image = (np.array(Image.open(IMAGE_PATH).convert('L')) / 255.0).astype(np.float32)
+    true_mask = (np.array(Image.open(GROUND_TRUTH).convert('L')) / 255.0).astype(np.float32)
+    true_mask[true_mask > 0] = 1
+    true_mask = true_mask.astype(bool)
+
     # Create or load labeler
     if True:  # Set to True to load previous seeds
-        labeler = SeedLabeler.load_seeds(f"{image_path.split('.')[0]}_seeds")
+        labeler = SeedLabeler.load_seeds(f"{IMAGE_PATH.split('.')[0]}_seeds")
     else:
-        labeler = SeedLabeler(image, image_path)
+        labeler = SeedLabeler(image, IMAGE_PATH)
         plt.show()  # User draws seeds
-        labeler.save_seeds(f"{image_path.split('.')[0]}_seeds")  # Save after labeling
-    # Compare memory usage
-    # regular_seg, regular_mem = measure_memory(
-    #     regular_graph_cuts, image, labeler.foreground, labeler.background)
-    # print(f"Regular GC Memory: {regular_mem:.2f} MB")
-    
-    # seg_vis = np.zeros((*regular_seg.shape, 4))
-    # seg_vis[~regular_seg] = [1, 1, 0, 0.6]  # Yellow FG
-    # seg_vis[regular_seg] = [0, 0, 1, 0.6]   # Blue BG
-    
-    # plt.imshow(image, cmap='gray' if len(image.shape) == 2 else None)
-    # plt.imshow(seg_vis)
+        labeler.save_seeds(f"{IMAGE_PATH.split('.')[0]}_seeds")  # Save after labeling
+
+    compute_baseline = False
+
+    # CSV file setup
+    csv_path = os.path.join(results_path, "experiment_results.csv")
+    with open(csv_path, mode="w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["Bandwidth", "Level", "Factor", "F1_Baseline", "Time_Baseline", "Memory_Baseline",
+                         "F1_Banded", "Time_Banded", "Memory_Banded"])
+
+    # Main experiment loop
+    with open(csv_path, mode="a", newline="") as file:
+        writer = csv.writer(file)
+
+        for level in [2,3,4,5,6,7]:
+            for factor in [2,4]:
+                for bandwidth in [1,2,3,4,5]:
+                    for sigma in [0.1] : 
+                        if level * factor <= 16:
+                            baseline_seg, banded_seg, all_results = memory_optimized_banded_cuts(
+                                image, labeler.foreground, labeler.background, level,
+                                band_width=bandwidth, sigma=sigma, factor=factor, compute_baseline=compute_baseline)
+
+                            # Initialize values
+                            DICE_baseline, time_baseline, memory_baseline = None, None, None
+
+                            # Process baseline segmentation (if computed)
+                            if baseline_seg is not None:
+                                DICE_baseline, recall, precision = get_metrics(baseline_seg, true_mask)
+                                time_baseline = all_results[0]["time"]
+                                memory_baseline = all_results[0]["memory"]
+
+                                # Save baseline segmentation image
+                                seg_vis = np.zeros((*baseline_seg.shape, 4))
+                                seg_vis[~baseline_seg] = [1, 1, 0, 0.6]  # Yellow FG
+                                seg_vis[baseline_seg] = [0, 0, 1, 0.6]   # Blue BG
+                                plt.imshow(image, cmap="grey")
+                                plt.imshow(seg_vis, alpha=0.5)
+                                plt.tight_layout()
+                                plt.axis("off")
+                                plt.savefig(os.path.join(results_path, f"regular_gc_results_{DICE_baseline:.4f}_{time_baseline:.2g}s_{memory_baseline:.3g}MB.png"))
+
+                                compute_baseline = False  # Compute baseline only once
+
+                            # Process banded segmentation
+                            accuracy, recall, precision = get_metrics(banded_seg, true_mask)
+                            time_banded = sum([s['time'] for s in all_results if s['type'] in ['segmentation', 'refinement']])
+                            memory_banded = max([s['memory'] for s in all_results if s['type'] in ['segmentation', 'refinement']])
+
+                            # Save banded segmentation image
+                            seg_vis = np.zeros((*banded_seg.shape, 4))
+                            seg_vis[~banded_seg] = [1, 1, 0, 0.6]  # Yellow FG
+                            seg_vis[banded_seg] = [0, 0, 1, 0.6]   # Blue BG
+                            plt.imshow(image, cmap="grey")
+                            plt.imshow(seg_vis, alpha=0.5)
+                            plt.tight_layout()
+                            plt.axis("off")
+                            plt.savefig(os.path.join(results_path, f"{bandwidth}_{level}_{factor}_{sigma}_banded_results_{accuracy:.4f}_{time_banded:.2g}s_{memory_banded:.3g}MB.png"))
+
+                            # Save results to CSV
+                            writer.writerow([bandwidth, level, factor, DICE_baseline, time_baseline, memory_baseline,
+                                            accuracy, time_banded, memory_banded])
+
+
+    # df = pd.read_csv(csv_path)
+    # plt.plot(df["Bandwidth"], df["Memory_Banded"], marker="o", label="Banded Memory Usage")
+    # plt.xlabel("Bandwidth")
+    # plt.ylabel("Memory (MB)")
+    # plt.legend()
     # plt.show()
 
-    banded_seg =  memory_optimized_banded_cuts(image, labeler.foreground, labeler.background,4, 2, sigma = 0.1, factor = 2)
-    seg_vis = np.zeros((*banded_seg.shape, 4))
-    seg_vis[~banded_seg] = [1, 1, 0, 0.6]  # Yellow FG
-    seg_vis[banded_seg] = [0, 0, 1, 0.6]   # Blue BG
+
+
+                
     
-    plt.imshow(image, cmap='gray' if len(image.shape) == 2 else None)
-    plt.imshow(seg_vis)
-    plt.show()
