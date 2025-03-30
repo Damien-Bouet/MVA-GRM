@@ -155,56 +155,23 @@ def create_memory_optimized_graph(img, level, band_width, prev_seg, sigma):
     
     # Calculate band and remove padding
     band_mask = (outer_edge ^ inner_edge)[band_width:-band_width, band_width:-band_width]
-    del outer_edge
-    del inner_edge
+    del outer_edge, inner_edge
+    
     source_pixels = np.argwhere(source_region[band_width:-band_width, band_width:-band_width])
     band_pixels = np.argwhere(band_mask | source_region[band_width:-band_width, band_width:-band_width] | sink_region[band_width:-band_width, band_width:-band_width])
-    del source_region
-    del sink_region
-    del band_mask
+    del source_region, sink_region, band_mask
 
     graph.add_nodes(len(band_pixels))
     
     node_map = {(y,x): idx for idx, (y,x) in enumerate(band_pixels)}
-    # 1. Add nodes in bulk for band pixels
-    # fig, axs = plt.subplots(1,3)    
-    # axs[0].imshow(prev_seg)
-    # axs[0].axis("off")
-    # axs[1].imshow(inner_edge)
-    # axs[1].axis("off")
-    # axs[2].imshow(outer_edge)
-    # axs[2].axis("off")
-    # plt.savefig(os.path.join(results_path, f"in_out_edges_{level}.png"))
-    # plt.figure(figsize =(30,20))
-    # plt.imshow(band_mask)
-    # plt.savefig(os.path.join(results_path, f"bandmask_{level}.png"))
-    
-    # # 2. Identify fixed regions
-    
-    # plt.imshow(binary_erosion(padded_inner_edge))
-    # plt.savefig(os.path.join(results_path, f"eroded_padded_inner_edge_{level}.png"))
-    # plt.imshow(padded_inner_edge)
-    # plt.savefig(os.path.join(results_path, f"padded_inner_edge_{level}.png"))
-    
+
     # 2. Process in chunks to reduce peak memory
     chunk_size = 10000
     offsets = [(-1, 0),
            (0, -1),
            (0, 1),
             (1, 0)]
-    # plt.figure(figsize =(30,20))
-    # plt.imshow(img, cmap = "gray")
-    # plt.imshow(prev_seg, alpha = 0.4)
-    # plt.imshow(band_mask, cmap = "jet", alpha=0.3)
-    # source_vis = np.zeros((*source_region.shape, 4))
-    # source_vis[source_region] = [1,1,0, 0.6]  # Yellow FG
-    # plt.imshow(source_vis[band_width:-band_width, band_width:-band_width])
-    # sink_vis = np.zeros((*sink_region.shape, 4))
-    # sink_vis[sink_region] = [0,0,1, 0.6]   # Blue BG
-    # plt.imshow(sink_vis[band_width:-band_width, band_width:-band_width])
-    
-    # plt.savefig(os.path.join(results_path, f"edges_{level}.png"))
-    # print(sink_pixels.shape, band_pixels.shape)
+
     for i in range(0, len(band_pixels), chunk_size):
         chunk = band_pixels[i:i+chunk_size]
         
@@ -224,11 +191,6 @@ def create_memory_optimized_graph(img, level, band_width, prev_seg, sigma):
                 ny, nx = y+dy, x+dx
                 if (ny,nx) in node_map:
                     diff = np.sum((img[y,x]-img[ny,nx])**2)
-                    # dist = np.sqrt((y - ny) ** 2 + (x - nx) ** 2)
-
-                    # Avoid division by zero for direct neighbors (if necessary)
-                    # dist = max(dist, 1e-6)  # Prevent division errors
-
                     # Compute weight with distance normalization
                     weight = np.exp(-diff / (2 * sigma**2))
                     graph.add_edge(node_map[(y,x)], node_map[(ny,nx)], weight, weight)
