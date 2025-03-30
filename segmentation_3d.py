@@ -98,7 +98,7 @@ class SeedLabeler:
         if image_path and os.path.exists(image_path):
             nii = nib.load(VOXEL_PATH)
             volume = nii.get_fdata() #np array
-
+            print(np.min(volume), np.max(volume))
             volume -= np.min(volume)
             volume = volume / np.max(volume)
             volume = np.transpose(volume, (2, 1, 0))
@@ -110,35 +110,6 @@ class SeedLabeler:
         labeler.background = np.load(os.path.join(save_dir, 'background.npy')).astype(bool)
         return labeler
 
-
-FG_PATH = "slice_120_seeds/foreground.npy"
-BG_PATH = "slice_120_seeds/background.npy"
-VOXEL_PATH = "IMG_0002.nii.gz"  # la_030_scan.nii "image1/liver_1.nii"
-GT_PATH = "IMG_0002.nii.gz"  # la_030_gt.nii
-
-
-nii = nib.load(VOXEL_PATH)
-volume = nii.get_fdata() #np array
-nii_label = nib.load(GT_PATH)
-volume_label = nii_label.get_fdata() #np array
-
-volume -= np.min(volume)
-volume = volume / np.max(volume)
-volume = np.transpose(volume, (2, 1, 0))
-print(np.min(volume), np.max(volume))
-
-
-slice_idx = 100
-
-if True:  # Set to True to load previous seeds
-    labeler = SeedLabeler.load_seeds(f"{VOXEL_PATH.split('.')[0]}_seeds")
-else:
-    labeler = SeedLabeler(volume, slice_idx, VOXEL_PATH)
-    plt.show()  # User draws seeds
-    labeler.save_seeds(f"{VOXEL_PATH.split('.')[0]}_seeds")  # Save after labeling
-
-fg_3d = labeler.foreground
-bg_3d = labeler.background
 
 # for n in [slice_idx]:
 #     plt.imshow(volume[:, :, n], cmap="gray")
@@ -338,6 +309,8 @@ from skimage.transform import resize
 from scipy.ndimage import binary_erosion, binary_dilation
 import maxflow  # assuming PyMaxflow is installed
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+
 
 # ----------------------------
 # 1. Coarsening functions for 3D volumes
@@ -416,11 +389,21 @@ def create_memory_optimized_graph(volume, level, band_width, prev_seg, sigma):
     sink_pixels = np.argwhere(sink_region[slice_obj])
     source_pixels = np.argwhere(source_region[slice_obj])
 
-    band_mask = (outer_edge ^ inner_edge)[slice_obj]
-    del outer_edge, inner_edge
+    sink_set = {tuple(pixel) for pixel in sink_pixels}
+    source_set = {tuple(pixel) for pixel in source_pixels}
 
-    # Include any pixel that is in the band, source or sink
+    band_mask = (outer_edge ^ inner_edge)[slice_obj]
+    del outer_edge, inner_edge, sink_pixels, source_pixels
+
+    # # Include any pixel that is in the band, source or sink
+    # import SimpleITK as sitk
+
+    # sitk_arr = sitk.GetImageFromArray((band_mask | source_region[slice_obj] | sink_region[slice_obj]).astype(int))
+    # sitk_arr.SetSpacing((1.0, 1.0, 1.0))
+    # sitk.WriteImage(sitk_arr, VOXEL_PATH.split(".")[0] + f"_band_pixels_level{level}.mha")
+
     band_pixels = np.argwhere(band_mask | source_region[slice_obj] | sink_region[slice_obj])
+    print("band_pixels:", band_pixels.shape)
     del source_region, sink_region, band_mask, slice_obj
 
     graph.add_nodes(len(band_pixels))
@@ -432,17 +415,21 @@ def create_memory_optimized_graph(volume, level, band_width, prev_seg, sigma):
     offsets = [(-1, 0, 0), (1, 0, 0),
                (0, -1, 0), (0, 1, 0),
                (0, 0, -1), (0, 0, 1)]
-    
+
     chunk_size = 10000
-    for i in range(0, len(band_pixels), chunk_size):
+    for i in tqdm(range(0, len(band_pixels), chunk_size), total=len(range(0, len(band_pixels), chunk_size))):
         chunk = band_pixels[i:i+chunk_size]
         
         # Add t-links based on whether the voxel is in sink or source regions.
         for z, y, x in chunk:
-            coord = (z, y, x)
-            if np.any(np.all(sink_pixels == np.array(coord), axis=1)):
+            coord = tuple((z, y, x))
+            # if np.any(np.all(sink_pixels == np.array(coord), axis=1)):
+            #     graph.add_tedge(node_map[coord], 1e9, 0)
+            # elif np.any(np.all(source_pixels == np.array(coord), axis=1)):
+            #     graph.add_tedge(node_map[coord], 0, 1e9)
+            if coord in sink_set:
                 graph.add_tedge(node_map[coord], 1e9, 0)
-            elif np.any(np.all(source_pixels == np.array(coord), axis=1)):
+            elif coord in source_set:
                 graph.add_tedge(node_map[coord], 0, 1e9)
             else:
                 graph.add_tedge(node_map[coord], 0, 0)
@@ -505,7 +492,7 @@ def regular_graph_cuts_3d(volume, fg_seeds, bg_seeds, sigma=0.1):
     offsets = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
     
     # Add n-links (neighboring connections)
-    for z in range(d):
+    for z in tqdm(range(d)):
         for y in range(h):
             for x in range(w):
                 for dz, dy, dx in offsets:
@@ -578,6 +565,25 @@ def memory_optimized_banded_cuts(volume, fg_seeds, bg_seeds, levels=3,
             'fg_seeds': new_fg.copy(),
             'bg_seeds': new_bg.copy()
         })
+
+        # if np.prod(new_vol.shape) < 2000000:
+        #     print("Computing baseline GC...", level)
+        #     gc.collect()
+        #     tracemalloc.start()
+        #     t0 = time()
+        #     regular_seg = regular_graph_cuts_3d(new_vol, new_fg, new_bg, sigma)
+        #     t1 = time()
+        #     _, peak_mem = tracemalloc.get_traced_memory()
+        #     tracemalloc.stop()
+        #     print(level, {
+        #         'type': 'baseline',
+        #         'time': t1 - t0,
+        #         'memory': peak_mem / 1e6,
+        #     })
+        # else:
+        #     print(new_vol.shape, "too big")
+
+
         del current_vol, current_fg, current_bg
         current_vol, current_fg, current_bg = new_vol, new_fg, new_bg
 
@@ -620,14 +626,14 @@ def memory_optimized_banded_cuts(volume, fg_seeds, bg_seeds, levels=3,
         graph, node_map = create_memory_optimized_graph(curr_vol, level, band_width, seg, sigma)
         print("Computing max flow...")
         graph.maxflow()
-        
+        t1 = time()
+        _, peak_mem = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
         # Update segmentation from graph solution
         for coord, nodeid in node_map.items():
             seg[coord] = bool(graph.get_segment(nodeid))
         
-        t1 = time()
-        _, peak_mem = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
         all_results.append({
             'level': level,
             'type': 'refinement',
@@ -637,6 +643,8 @@ def memory_optimized_banded_cuts(volume, fg_seeds, bg_seeds, levels=3,
             'segmentation': seg.copy(),
             'band_mask': band_mask.copy()
         })
+        # plt.imshow(seg[:, :, int(seg.shape[2]//2)])
+        # plt.show()
     
     return regular_seg, seg, all_results
 
@@ -728,10 +736,44 @@ def create_detailed_visualization(results, cut, factor, aspect_ratio):
     
     
     plt.suptitle("Banded Graph Cuts Progression")
-    # fig.savefig(os.path.join(os.path.dirname(IMAGE_PATH), "results", os.path.basename(IMAGE_PATH),"all_res.png"))
+    fig.savefig(VOXEL_PATH.split(".")[0] + "_res.png")
     plt.show()
 
 
+
+
+FG_PATH = "slice_120_seeds/foreground.npy"
+BG_PATH = "slice_120_seeds/background.npy"
+# VOXEL_PATH = "IMG_0002.nii.gz"  # la_030_scan.nii "image1/liver_1.nii"
+# GT_PATH = "IMG_0002.nii.gz"  # la_030_gt.nii
+VOXEL_PATH = "la_030_scan.nii"  # la_030_scan.nii "image1/liver_1.nii"
+GT_PATH = "la_030_gt.nii"  # la_030_gt.nii
+
+nii = nib.load(VOXEL_PATH)
+volume = nii.get_fdata() #np array
+
+nii_label = nib.load(GT_PATH)
+volume_label = nii_label.get_fdata() #np array
+
+volume -= np.min(volume)
+volume = volume / np.max(volume)
+print(np.min(volume), np.max(volume))
+
+
+# slice_idx = 100
+slice_idx = 70
+
+if False:  # Set to True to load previous seeds
+    labeler = SeedLabeler.load_seeds(f"{VOXEL_PATH.split('.')[0]}_seeds")
+else:
+    labeler = SeedLabeler(volume, slice_idx, VOXEL_PATH)
+    plt.show()  # User draws seeds
+    labeler.save_seeds(f"{VOXEL_PATH.split('.')[0]}_seeds")  # Save after labeling
+
+fg_3d = labeler.foreground
+bg_3d = labeler.background
+
+print("volume", volume.shape)
 
 baseline_seg, banded_seg, all_results = memory_optimized_banded_cuts(volume,fg_3d,bg_3d,levels=3,band_width=2,factor=2,sigma=0.01, compute_baseline=False)
 
@@ -745,9 +787,9 @@ import SimpleITK as sitk
 banded_seg = banded_seg.astype(int)
 sitk_arr = sitk.GetImageFromArray(banded_seg)
 sitk_arr.SetSpacing((1.0, 1.0, 1.0))
-sitk.WriteImage(sitk_arr, VOXEL_PATH.replace("scan.nii", "seg.mha"))
+sitk.WriteImage(sitk_arr, VOXEL_PATH.split(".")[0] + "seg.mha")
 
 baseline_seg = baseline_seg.astype(int)
 sitk_arr = sitk.GetImageFromArray(baseline_seg)
 sitk_arr.SetSpacing((1.0, 1.0, 1.0))
-sitk.WriteImage(sitk_arr, VOXEL_PATH.replace("scan.nii", "base_seg.mha"))
+sitk.WriteImage(sitk_arr, VOXEL_PATH.split(".")[0] + "base_seg.mha")
