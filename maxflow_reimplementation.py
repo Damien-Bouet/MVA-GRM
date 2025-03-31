@@ -12,6 +12,12 @@ class GraphFloat:
         for node in range(idx, idx + num):
             self.nodes.add(node)
         return idx
+    
+    def add_grid_nodes(self, shape):
+        h, w = shape
+        nodeids = np.arange(len(self.nodes), len(self.nodes) + h * w).reshape(h, w)
+        self.nodes.update(nodeids.flatten())
+        return nodeids
 
     def add_edge(self, u, v, capacity_uv, capacity_vu):
         self.graph[u][v] = self.graph[u].get(v, 0) + capacity_uv
@@ -38,13 +44,17 @@ class GraphFloat:
 
     def maxflow(self):
         source, sink = -1, -2
+        
+        self.nodes.add(source)
+        self.nodes.add(sink)
+        
         residual_graph = defaultdict(dict)
 
         for u in self.nodes:
             residual_graph[u] = self.graph[u].copy()
 
-        residual_graph[source] = {}
-        residual_graph[sink] = {}
+        residual_graph[source] = defaultdict(int)
+        residual_graph[sink] = defaultdict(int)
 
         for node, (cap_source, cap_sink) in self.t_edges.items():
             residual_graph[source][node] = cap_source
@@ -85,7 +95,7 @@ class GraphFloat:
                     queue.append(v)
                     visited[v] = True
 
-        return visited.get(node, False)
+        return not visited.get(node, False)
 
     def get_grid_segments(self, nodeids):
         h, w = nodeids.shape

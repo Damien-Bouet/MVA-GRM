@@ -1,7 +1,9 @@
 import numpy as np
 import cv2
 from scipy.ndimage import binary_dilation, binary_erosion
-import maxflow
+# import maxflow
+# from maxflow_reimplementation import GraphFloat
+from maxflow import GraphFloat
 from tqdm import tqdm
 import tracemalloc
 import gc
@@ -60,14 +62,14 @@ class SeedLabeler:
             n = max(abs(self.previous_pos[0] - x), abs(self.previous_pos[1] - y))
             for x_, y_ in zip(np.linspace(self.previous_pos[0], x, n), np.linspace(self.previous_pos[1], y, n)):
                 if self.current_label == 'foreground':
-                    self.foreground[int(y_):int(y_)+4, int(x_):int(x_)+4] = True
+                    self.foreground[int(y_):int(y_)+2, int(x_):int(x_)+2] = True
                 elif self.current_label == 'background':
-                    self.background[int(y_):int(y_)+4, int(x_):int(x_)+4] = True
+                    self.background[int(y_):int(y_)+2, int(x_):int(x_)+2] = True
                     
         if self.current_label == 'foreground':
-            self.foreground[y:y+2, x:x+2] = True
+            self.foreground[y:y+1, x:x+1] = True
         elif self.current_label == 'background':
-            self.background[y:y+2, x:x+2] = True
+            self.background[y:y+1, x:x+1] = True
             
         self.previous_pos = (x, y)
         self.update_display()
@@ -105,6 +107,10 @@ class SeedLabeler:
         else:
             raise FileNotFoundError(f"Original image not found at {image_path}")
         
+        image = coarsen(image, factor=2)
+        image = coarsen(image, factor=2)
+        image = coarsen(image, factor=2)
+
         labeler = cls(image, image_path, no_fig=True)
         labeler.foreground = np.load(os.path.join(save_dir, 'foreground.npy')).astype(bool)
         labeler.background = np.load(os.path.join(save_dir, 'background.npy')).astype(bool)
@@ -140,7 +146,7 @@ def coarsen_seeds(seeds, factor=2):
 
 def create_memory_optimized_graph(img, level, band_width, prev_seg, sigma):
     """Memory-efficient graph construction"""
-    graph = maxflow.GraphFloat()
+    graph = GraphFloat()
     
     padded_seg = np.pad(prev_seg, band_width, mode='reflect')
 
@@ -463,7 +469,7 @@ def create_detailed_visualization(results, aspect_ratio):
 def regular_graph_cuts(image, fg_seeds, bg_seeds, sigma=0.1):
     """Baseline full graph cuts for comparison"""
     h, w = image.shape[:2]
-    graph = maxflow.GraphFloat()
+    graph = GraphFloat()
     nodeids = graph.add_grid_nodes((h, w))
     
     print("Creating the Graph...")
@@ -530,27 +536,32 @@ def get_metrics(segmentation, ground_truth):
 
 if __name__ == "__main__":
     # Load image and seeds
-    IMAGE_PATH = "images/car_4k.jpg"
-    GROUND_TRUTH = "images/car_4k_gt.png"
+    IMAGE_PATH = "images/venus_hd.jpg"
+    GROUND_TRUTH = "images/venus_hd_gt.png"
 
     results_path = os.path.join(os.path.dirname(IMAGE_PATH), "results", os.path.basename(IMAGE_PATH))
     os.makedirs(results_path, exist_ok=True)
 
     # Load images
     image = (np.array(Image.open(IMAGE_PATH).convert('L')) / 255.0).astype(np.float32)
+    image = coarsen(image, factor=2)
+    image = coarsen(image, factor=2)
+    image = coarsen(image, factor=2)
+
+    print(image.shape)
     true_mask = (np.array(Image.open(GROUND_TRUTH).convert('L')) / 255.0).astype(np.float32)
     true_mask[true_mask > 0] = 1
     true_mask = true_mask.astype(bool)
 
     # Create or load labeler
-    if False:  # Set to True to load previous seeds
+    if True:  # Set to True to load previous seeds
         labeler = SeedLabeler.load_seeds(f"{IMAGE_PATH.split('.')[0]}_seeds")
     else:
         labeler = SeedLabeler(image, IMAGE_PATH)
         plt.show()  # User draws seeds
         labeler.save_seeds(f"{IMAGE_PATH.split('.')[0]}_seeds")  # Save after labeling
 
-    compute_baseline = False
+    compute_baseline = True
 
     # CSV file setup
     csv_path = os.path.join(results_path, "experiment_results.csv")
@@ -562,7 +573,7 @@ if __name__ == "__main__":
     # Main experiment loop
     with open(csv_path, mode="a", newline="") as file:
         writer = csv.writer(file)
-        for level in [5]:
+        for level in [3]:
             for factor in [2]:
                 for bandwidth in [2]:
                     for sigma in [0.1]:
