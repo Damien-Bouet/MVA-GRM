@@ -1,18 +1,23 @@
-import nibabel as nib
-import numpy as np
-import cv2
-from scipy.ndimage import binary_dilation, binary_erosion
-import maxflow
-import matplotlib.pyplot as plt
-from scipy.ndimage import zoom
-
-
-import numpy as np
-import matplotlib.pyplot as plt
+import gc
+from time import time
+import tracemalloc
 import os
-import cv2
+from tqdm import tqdm
+
+import numpy as np
+from scipy.ndimage import binary_dilation, binary_erosion
+from skimage.transform import resize
+import maxflow  # Can be replaced by "import python_maxflow_reimplementation as maxflow" to use from scratch re-implementation
+import matplotlib.pyplot as plt
+import nibabel as nib
+import SimpleITK as sitk
+
+
 
 class SeedLabeler:
+    """
+    Custom class to draw the seed labels for graph cut segmentation
+    """
     def __init__(self, image, slice_index=0, image_path=None, no_fig=False):
         self.image = image  # Expecting a 3D array
         self.slice_index = slice_index
@@ -111,211 +116,9 @@ class SeedLabeler:
         return labeler
 
 
-# for n in [slice_idx]:
-#     plt.imshow(volume[:, :, n], cmap="gray")
-#     plt.imshow(fg_3d[:, :, n], cmap="Blues", alpha=0.2)
-#     plt.imshow(bg_3d[:, :, n], cmap="Reds", alpha=0.2)
-#     plt.imshow(volume_label[:, :, n], cmap="Greens", alpha=0.2)
-#     plt.show()
-
-# fg_expanded = expand_foreground_seed(fg_3d, radius=1)
-
-# seg_sub = regular_graph_cuts_3d(subvol, fg_expanded[:, :, z_start:z_end], bg_3d[:, :, z_start:z_end], sigma=5)
-
-# np.save("regular_segmentation_3d_mask.npy", seg_sub.astype(np.uint8))
-
-
-
-# # #graph cuts
-# def regular_graph_cuts_3d(volume, fg_seeds, bg_seeds, sigma=0.1):
-#     print("DEBUG SHAPES:")
-#     print("volume.shape:", volume.shape)
-#     print("fg_seeds.shape:", fg_seeds.shape)
-#     print("bg_seeds.shape:", bg_seeds.shape)
-
-#     assert volume.shape == fg_seeds.shape == bg_seeds.shape, "Shape mismatch!"
-    
-#     D, H, W = volume.shape
-#     graph = maxflow.GraphFloat()
-#     nodeids = graph.add_grid_nodes((D, H, W))
-#     print("Creating the Graph...")
-
-#     # Add t-links
-#     for z in range(D):
-#         for y in range(H):
-#             for x in range(W):
-#                 if fg_seeds[z, y, x]:
-#                     graph.add_tedge(nodeids[z, y, x], 0, 1e9)
-#                 elif bg_seeds[z, y, x]:
-#                     graph.add_tedge(nodeids[z, y, x], 1e9, 0)
-
-#     # 6-connected neighborhood
-#     offsets = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
-#     for z in range(D):
-#         for y in range(H):
-#             for x in range(W):
-#                 for dz, dy, dx in offsets:
-#                     nz, ny, nx = z + dz, y + dy, x + dx
-#                     if 0 <= nz < D and 0 <= ny < H and 0 <= nx < W:
-#                         diff = (volume[z, y, x] - volume[nz, ny, nx]) ** 2
-#                         weight = np.exp(-diff / (2 * sigma ** 2))
-#                         graph.add_edge(nodeids[z, y, x], nodeids[nz, ny, nx], weight, weight)
-#     print("doing maxflow")
-#     graph.maxflow()
-#     return graph.get_grid_segments(nodeids)
-
-# def expand_foreground_seed(fg_3d, radius=1):
-#     # Create spherical structuring element
-#     zz, yy, xx = np.ogrid[-radius:radius+1, -radius:radius+1, -radius:radius+1]
-#     mask = xx**2 + yy**2 + zz**2 <= radius**2
-
-#     fg_dilated = binary_dilation(fg_3d, structure=mask)
-#     return fg_dilated
-
-
-# #experiment
-# def resize_3d(seg, new_shape):
-#     """Resize a 3D segmentation mask using nearest neighbor interpolation."""
-#     d, h, w = seg.shape
-#     new_d, new_h, new_w = new_shape
-
-#     # Resize height and width using cv2
-#     resized_slices = [cv2.resize(seg[i, :, :].astype(float), (new_w, new_h), interpolation=cv2.INTER_NEAREST) 
-#                       for i in range(d)]
-#     resized_2d = np.stack(resized_slices, axis=0)  # Keep depth axis intact
-
-#     # Resize depth using scipy.ndimage.zoom
-#     scale_d = new_d / d
-#     resized_3d = zoom(resized_2d, (scale_d, 1, 1), order=0)  # Nearest neighbor
-
-#     return resized_3d > 0.5  # Thresholding
-# #3d segmentation
-
-# #3d banded cut
-# def coarsen_3d(img, factor=2):
-#     """Coarsen 3D image with padding if needed along all dimensions."""
-#     d, h, w = img.shape[:3]
-    
-#     # Pad if dimensions aren't divisible by factor
-#     pad_d = (factor - d % factor) % factor
-#     pad_h = (factor - h % factor) % factor
-#     pad_w = (factor - w % factor) % factor
-    
-#     if pad_d > 0 or pad_h > 0 or pad_w > 0:
-#         img = np.pad(img, ((0, pad_d), (0, pad_h), (0, pad_w)), mode='reflect')
-    
-#     # Reshape and apply downsampling along all dimensions
-#     d_p, h_p, w_p = img.shape[:3]
-#     img = img.reshape(d_p//factor, factor, h_p//factor, factor, w_p//factor, factor, -1)
-#     img = img.mean(axis=(1, 3, 5))[:, :, :, 0]
-    
-#     return img[:d//factor, :h//factor, :w//factor]
-
-
-
-# def coarsen_seeds_3d(seeds, factor=2):
-#     """Coarsen 3D seeds with padding to handle non-divisible dimensions."""
-#     d, h, w = seeds.shape
-    
-#     # Pad to make dimensions divisible by factor
-#     pad_d = (factor - d % factor) % factor
-#     pad_h = (factor - h % factor) % factor
-#     pad_w = (factor - w % factor) % factor
-    
-#     padded = np.pad(seeds, ((0, pad_d), (0, pad_h), (0, pad_w)), mode='constant')
-#     print(padded.shape, factor)
-#     # Reshape and take max over blocks
-#     d_p, h_p, w_p = padded.shape
-#     coarse = padded.reshape(d_p//factor, factor, h_p//factor, factor, w_p//factor, factor)
-#     coarse = coarse.max(axis=(1, 3, 5)).astype(bool)
-    
-#     return coarse[:d//factor, :h//factor, :w//factor]
-
-
-# def banded_cuts_3d(volume, fg_seeds, bg_seeds, levels=2, band_width=2, factor=2, sigma=0.1):
-#     all_results = []
-#     pyramids = [(volume.copy(), fg_seeds.copy(), bg_seeds.copy())]
-
-#     # 1. Coarsen volume & seeds
-#     for level in range(levels):
-#         v, f, b = pyramids[-1]
-#         v_c = coarsen_3d(v, factor=factor)
-#         f_c = coarsen_seeds_3d(f.astype(np.uint8), factor=factor).astype(bool)
-#         b_c = coarsen_seeds_3d(b.astype(np.uint8), factor=factor).astype(bool)
-#         pyramids.append((v_c, f_c, b_c))
-
-#     # 2. Solve coarsest
-#     current_img, current_fg, current_bg = pyramids[-1]
-#     #seg = regular_graph_cuts_3d(current_img, current_fg, current_bg, sigma)
-#     print(current_img.shape)
-#     seg = regular_graph_cuts_3d(current_img, current_fg, current_bg, sigma)
-#     # (D, H, W) apparemment convention différente
-
-#     # 3. Uncoarsening loop
-#     for level in reversed(range(levels)):
-#         current_seg = seg.copy()   
-#         new_img, _, _ = pyramids[level]
-#         # Resize segmentation to next finer level
-#         # depth = new_img.shape[2]
-#         # resized = []
-#         # for i in range(depth):
-#         #     resized_slice = cv2.resize(prev_seg[:, :, i], 
-#         #                                (new_img.shape[1], new_img.shape[0]), 
-#         #                                interpolation=cv2.INTER_NEAREST)
-#         #     resized.append(resized_slice)
-#         # seg = np.stack(resized, axis=2).astype(bool)
-#         print(current_seg.shape, new_img.shape)
-#         seg = resize_3d(current_seg.copy().astype(float), new_img.shape)
-
-#         band_mask = binary_dilation(seg, iterations=band_width) ^ binary_erosion(seg, iterations=band_width)
-#         band_voxels = np.argwhere(band_mask)
-
-#         graph = maxflow.GraphFloat()
-#         node_map = {}
-#         nodeids = graph.add_nodes(len(band_voxels))
-#         for idx, (x, y, z) in enumerate(band_voxels):
-#             node_map[(x, y, z)] = idx
-#             # T-links
-#             if fg_seeds[x, y, z]:
-#                 graph.add_tedge(idx, 0, 1e9)
-#             elif bg_seeds[x, y, z]:
-#                 graph.add_tedge(idx, 1e9, 0)
-#             else:
-#                 graph.add_tedge(idx, 0, 0)
-
-#         # N-links
-#         offsets = [(1,0,0), (0,1,0), (0,0,1)]
-#         for (x, y, z), idx in node_map.items():
-#             for dx, dy, dz in offsets:
-#                 nx, ny, nz = x+dx, y+dy, z+dz
-#                 if (nx, ny, nz) in node_map:
-#                     diff = (new_img[x,y,z] - new_img[nx,ny,nz]) ** 2
-#                     w = np.exp(-diff / (2 * sigma ** 2))
-#                     graph.add_edge(idx, node_map[(nx,ny,nz)], w, w)
-
-#         graph.maxflow()
-#         for (x, y, z), idx in node_map.items():
-#             seg[x, y, z] = graph.get_segment(idx)
-
-#     return seg
-
-
-
-import numpy as np
-import gc
-from time import time
-import tracemalloc
-from skimage.transform import resize
-from scipy.ndimage import binary_erosion, binary_dilation
-import maxflow  # assuming PyMaxflow is installed
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-
-
 # ----------------------------
 # 1. Coarsening functions for 3D volumes
 # ----------------------------
-
 def coarsen(img, factor=2):
     """Coarsen 3D image with padding if needed along all dimensions."""
     d, h, w = img.shape[:3]
@@ -346,7 +149,7 @@ def coarsen_seeds(seeds, factor=2):
     pad_w = (factor - w % factor) % factor
     padded = np.pad(seeds, ((0, pad_d), (0, pad_h), (0, pad_w)), mode='constant')
     d_p, h_p, w_p = padded.shape
-    # Reshape into blocks of shape (factor, factor, factor) and take maximum
+
     coarse = padded.reshape(d_p // factor, factor,
                             h_p // factor, factor,
                             w_p // factor, factor).max(axis=(1, 3, 5)).astype(bool)
@@ -356,32 +159,27 @@ def coarsen_seeds(seeds, factor=2):
 # ----------------------------
 # 2. Graph Construction in 3D
 # ----------------------------
-
-
-def create_memory_optimized_graph(volume, level, band_width, prev_seg, sigma):
+def create_memory_optimized_graph(volume, band_width, prev_seg, sigma):
     """
     Memory-efficient graph construction for a 3D volume.
     prev_seg is a 3D segmentation (binary) array.
     """
     graph = maxflow.GraphFloat()
-    
-    # Pad the segmentation in 3 dimensions
     padded_seg = np.pad(prev_seg,
                         ((band_width, band_width),
                          (band_width, band_width),
                          (band_width, band_width)),
                         mode='reflect')
     
-    # Compute inner and outer edges (3D binary morphology)
+    # Compute inner and outer edges
     inner_edge = binary_erosion(padded_seg, iterations=band_width)
     outer_edge = binary_dilation(padded_seg, iterations=band_width)
     del padded_seg
 
-    # Define sink and source regions (use dilation/erosion in 3D)
+    # Define sink and source regions
     sink_region = binary_dilation(outer_edge) & ~outer_edge
     source_region = ~binary_erosion(inner_edge) & inner_edge
 
-    # Remove padding: note that we assume the padding width is band_width on each side.
     slice_obj = (slice(band_width, -band_width),
                  slice(band_width, -band_width),
                  slice(band_width, -band_width))
@@ -395,9 +193,7 @@ def create_memory_optimized_graph(volume, level, band_width, prev_seg, sigma):
     band_mask = (outer_edge ^ inner_edge)[slice_obj]
     del outer_edge, inner_edge, sink_pixels, source_pixels
 
-    # # Include any pixel that is in the band, source or sink
-    # import SimpleITK as sitk
-
+    # # Save the band
     # sitk_arr = sitk.GetImageFromArray((band_mask | source_region[slice_obj] | sink_region[slice_obj]).astype(int))
     # sitk_arr.SetSpacing((1.0, 1.0, 1.0))
     # sitk.WriteImage(sitk_arr, VOXEL_PATH.split(".")[0] + f"_band_pixels_level{level}.mha")
@@ -408,7 +204,6 @@ def create_memory_optimized_graph(volume, level, band_width, prev_seg, sigma):
 
     graph.add_nodes(len(band_pixels))
     
-    # Create a map from 3D coordinate to node id
     node_map = {tuple(coord): idx for idx, coord in enumerate(band_pixels)}
     
     # Offsets for 6-connected neighborhood in 3D:
@@ -423,10 +218,6 @@ def create_memory_optimized_graph(volume, level, band_width, prev_seg, sigma):
         # Add t-links based on whether the voxel is in sink or source regions.
         for z, y, x in chunk:
             coord = tuple((z, y, x))
-            # if np.any(np.all(sink_pixels == np.array(coord), axis=1)):
-            #     graph.add_tedge(node_map[coord], 1e9, 0)
-            # elif np.any(np.all(source_pixels == np.array(coord), axis=1)):
-            #     graph.add_tedge(node_map[coord], 0, 1e9)
             if coord in sink_set:
                 graph.add_tedge(node_map[coord], 1e9, 0)
             elif coord in source_set:
@@ -447,11 +238,10 @@ def create_memory_optimized_graph(volume, level, band_width, prev_seg, sigma):
     
     return graph, node_map
 
+
 # ----------------------------
 # 3. Multilevel Banded Cuts in 3D
 # ----------------------------
-
-
 def regular_graph_cuts_3d(volume, fg_seeds, bg_seeds, sigma=0.1):
     """
     Baseline full graph cuts for a 3D volume segmentation.
@@ -474,7 +264,6 @@ def regular_graph_cuts_3d(volume, fg_seeds, bg_seeds, sigma=0.1):
     
     graph = maxflow.GraphFloat()
     
-    # Create a grid of nodes in 3D
     nodeids = graph.add_grid_nodes((d, h, w))
     
     print("Creating the Graph...")
@@ -566,24 +355,6 @@ def memory_optimized_banded_cuts(volume, fg_seeds, bg_seeds, levels=3,
             'bg_seeds': new_bg.copy()
         })
 
-        # if np.prod(new_vol.shape) < 2000000:
-        #     print("Computing baseline GC...", level)
-        #     gc.collect()
-        #     tracemalloc.start()
-        #     t0 = time()
-        #     regular_seg = regular_graph_cuts_3d(new_vol, new_fg, new_bg, sigma)
-        #     t1 = time()
-        #     _, peak_mem = tracemalloc.get_traced_memory()
-        #     tracemalloc.stop()
-        #     print(level, {
-        #         'type': 'baseline',
-        #         'time': t1 - t0,
-        #         'memory': peak_mem / 1e6,
-        #     })
-        # else:
-        #     print(new_vol.shape, "too big")
-
-
         del current_vol, current_fg, current_bg
         current_vol, current_fg, current_bg = new_vol, new_fg, new_bg
 
@@ -611,7 +382,6 @@ def memory_optimized_banded_cuts(volume, fg_seeds, bg_seeds, levels=3,
         
         # Project segmentation up to the current level volume
         curr_vol = pyramids[level][0]
-        # Here we replace cv2.resize with skimage.transform.resize for 3D volumes.
         seg = resize(current_seg.astype(float), curr_vol.shape[:3], order=0,
                      mode='reflect', preserve_range=True) > 0.5
         
@@ -623,7 +393,7 @@ def memory_optimized_banded_cuts(volume, fg_seeds, bg_seeds, levels=3,
         gc.collect()
         tracemalloc.start()
         print(f"Creating the Graph at level {level}...")
-        graph, node_map = create_memory_optimized_graph(curr_vol, level, band_width, seg, sigma)
+        graph, node_map = create_memory_optimized_graph(curr_vol, band_width, seg, sigma)
         print("Computing max flow...")
         graph.maxflow()
         t1 = time()
@@ -643,8 +413,6 @@ def memory_optimized_banded_cuts(volume, fg_seeds, bg_seeds, levels=3,
             'segmentation': seg.copy(),
             'band_mask': band_mask.copy()
         })
-        # plt.imshow(seg[:, :, int(seg.shape[2]//2)])
-        # plt.show()
     
     return regular_seg, seg, all_results
 
@@ -740,56 +508,71 @@ def create_detailed_visualization(results, cut, factor, aspect_ratio):
     plt.show()
 
 
+def dice_score(pred, label):
+    """
+    Compute the DICE score between a predicted segmentation and a ground truth label.
+    :param pred: numpy array of predicted segmentation
+    :param label: numpy array of ground truth segmentation
+    :return: DICE coefficient
+    """
+    if pred is None:
+        return None
+    pred = np.asarray(pred, dtype=bool)
+    label = np.asarray(label, dtype=bool)
+    
+    TP = np.sum(pred & label)  # True Positives
+    FP = np.sum(pred & ~label) # False Positives
+    FN = np.sum(~pred & label) # False Negatives
+    
+    return (2 * TP) / (2 * TP + FP + FN) if (2 * TP + FP + FN) > 0 else 1.0
+    
 
+if __name__ == "__main__":
 
-FG_PATH = "slice_120_seeds/foreground.npy"
-BG_PATH = "slice_120_seeds/background.npy"
-# VOXEL_PATH = "IMG_0002.nii.gz"  # la_030_scan.nii "image1/liver_1.nii"
-# GT_PATH = "IMG_0002.nii.gz"  # la_030_gt.nii
-VOXEL_PATH = "la_030_scan.nii"  # la_030_scan.nii "image1/liver_1.nii"
-GT_PATH = "la_030_gt.nii"  # la_030_gt.nii
+    VOXEL_PATH = "scans_3d\heart_ct.nii"
+    GT_PATH = "scans_3d\heart_ct_gt.nii"
 
-nii = nib.load(VOXEL_PATH)
-volume = nii.get_fdata() #np array
+    nii = nib.load(VOXEL_PATH)
+    volume = nii.get_fdata() #np array
 
-nii_label = nib.load(GT_PATH)
-volume_label = nii_label.get_fdata() #np array
+    nii_label = nib.load(GT_PATH)
+    volume_label = nii_label.get_fdata() #np array
+    # volume_label = np.transpose(coarsen((volume_label > 0).astype(int), 2), (2, 1, 0))
 
-volume -= np.min(volume)
-volume = volume / np.max(volume)
-print(np.min(volume), np.max(volume))
+    volume_label = volume_label.astype(int)
 
+    volume -= np.min(volume)
+    volume = volume / np.max(volume)
 
-# slice_idx = 100
-slice_idx = 70
+    SLICE_IDX = 70
 
-if False:  # Set to True to load previous seeds
-    labeler = SeedLabeler.load_seeds(f"{VOXEL_PATH.split('.')[0]}_seeds")
-else:
-    labeler = SeedLabeler(volume, slice_idx, VOXEL_PATH)
-    plt.show()  # User draws seeds
-    labeler.save_seeds(f"{VOXEL_PATH.split('.')[0]}_seeds")  # Save after labeling
+    if False:  # Set to True to load previous seeds
+        labeler = SeedLabeler.load_seeds(f"{VOXEL_PATH.split('.')[0]}_seeds")
+    else:
+        labeler = SeedLabeler(volume, SLICE_IDX, VOXEL_PATH)
+        plt.show()  # User draws seeds
+        labeler.save_seeds(f"{VOXEL_PATH.split('.')[0]}_seeds")  # Save after labeling
 
-fg_3d = labeler.foreground
-bg_3d = labeler.background
+    fg_3d = labeler.foreground
+    bg_3d = labeler.background
 
-print("volume", volume.shape)
+    print("volume", volume.shape)
 
-baseline_seg, banded_seg, all_results = memory_optimized_banded_cuts(volume,fg_3d,bg_3d,levels=3,band_width=2,factor=2,sigma=0.01, compute_baseline=False)
+    baseline_seg, banded_seg, all_results = memory_optimized_banded_cuts(volume,fg_3d,bg_3d,levels=3,band_width=2,factor=2,sigma=0.01, compute_baseline=True)
 
-cut = slice_idx
+    print("DICE banded_seg:", dice_score(banded_seg, volume_label))
+    print("DICE baseline_seg:", dice_score(baseline_seg, volume_label))
 
-create_detailed_visualization(all_results, cut, factor=2, aspect_ratio=volume.shape[1]/volume.shape[0])
+    cut = SLICE_IDX
 
+    create_detailed_visualization(all_results, cut, factor=2, aspect_ratio=volume.shape[1]/volume.shape[0])
 
-import SimpleITK as sitk
+    banded_seg = banded_seg.astype(int)
+    sitk_arr = sitk.GetImageFromArray(banded_seg)
+    sitk_arr.SetSpacing((1.0, 1.0, 1.0))
+    sitk.WriteImage(sitk_arr, VOXEL_PATH.split(".")[0] + "seg.mha")
 
-banded_seg = banded_seg.astype(int)
-sitk_arr = sitk.GetImageFromArray(banded_seg)
-sitk_arr.SetSpacing((1.0, 1.0, 1.0))
-sitk.WriteImage(sitk_arr, VOXEL_PATH.split(".")[0] + "seg.mha")
-
-baseline_seg = baseline_seg.astype(int)
-sitk_arr = sitk.GetImageFromArray(baseline_seg)
-sitk_arr.SetSpacing((1.0, 1.0, 1.0))
-sitk.WriteImage(sitk_arr, VOXEL_PATH.split(".")[0] + "base_seg.mha")
+    baseline_seg = baseline_seg.astype(int)
+    sitk_arr = sitk.GetImageFromArray(baseline_seg)
+    sitk_arr.SetSpacing((1.0, 1.0, 1.0))
+    sitk.WriteImage(sitk_arr, VOXEL_PATH.split(".")[0] + "base_seg.mha")

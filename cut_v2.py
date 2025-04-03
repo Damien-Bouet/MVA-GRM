@@ -1,21 +1,17 @@
+import tracemalloc
+import gc
+import os
+from time import time
+from tqdm import tqdm
+
+
 import numpy as np
 import cv2
 from scipy.ndimage import binary_dilation, binary_erosion
-# import maxflow
-# from maxflow_reimplementation import GraphFloat
-from maxflow import GraphFloat
-from tqdm import tqdm
-import tracemalloc
-import gc
+from maxflow import GraphFloat  # Can be replaced by "from python_maxflow_reimplementation import GraphFloat" to use from scratch re-implementation
 from PIL import Image
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
-
-from time import time
 import networkx
-
-import os
-
 import csv
 import pandas as pd
 
@@ -144,7 +140,7 @@ def coarsen_seeds(seeds, factor=2):
 # 1. Band-Limited Graph Construction
 # ----------------------------
 
-def create_memory_optimized_graph(img, level, band_width, prev_seg, sigma):
+def create_memory_optimized_graph(img, band_width, prev_seg, sigma):
     """Memory-efficient graph construction"""
     graph = GraphFloat()
     
@@ -307,7 +303,7 @@ def memory_optimized_banded_cuts(image, fg_seeds, bg_seeds, levels=3, band_width
         gc.collect()
         tracemalloc.start()
         print("Creating the Graph...")
-        graph, node_map = create_memory_optimized_graph(curr_img, level, band_width, seg, sigma)
+        graph, node_map = create_memory_optimized_graph(curr_img, band_width, seg, sigma)
         print("Doing max flow...")
         graph.maxflow()
         
@@ -554,7 +550,7 @@ if __name__ == "__main__":
     true_mask = true_mask.astype(bool)
 
     # Create or load labeler
-    if True:  # Set to True to load previous seeds
+    if False:  # Set to True to load previous seeds
         labeler = SeedLabeler.load_seeds(f"{IMAGE_PATH.split('.')[0]}_seeds")
     else:
         labeler = SeedLabeler(image, IMAGE_PATH)
@@ -582,7 +578,6 @@ if __name__ == "__main__":
                                 image, labeler.foreground, labeler.background, level,
                                 band_width=bandwidth, sigma=sigma, factor=factor, compute_baseline=compute_baseline)
                             
-                            # 4. Create memory-efficient visualization
                             create_detailed_visualization(all_results, image.shape[1]/image.shape[0])
             
                             # # Initialize values
